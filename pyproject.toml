@@ -1,0 +1,16 @@
+[project]
+name = "docusense"
+version = "0.1.0"
+description = "DocuSense is a powerful PDF parsing and content extraction tool that leverages Large Language Models (LLMs) and Vision Language Models (VLMs) to extract, process, and summarize content from PDF documents. Whether your PDF contains text, images, or a combination of both, DocuSense provides a comprehensive solution for extracting meaningful information."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "anthropic>=0.49.0",
+    "fitz>=0.0.1.dev2",
+    "google-generativeai>=0.8.4",
+    "numpy>=2.2.3",
+    "openai>=1.66.2",
+    "pillow>=11.1.0",
+    "pymupdf>=1.25.3",
+    "pytesseract>=0.3.13",
+]
