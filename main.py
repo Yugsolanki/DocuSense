@@ -208,10 +208,79 @@ class OpenAIProvider(BaseLLMProvider):
             return processed_text, summary, confidence
 
         except Exception as e:
-            logger.error(
-                f"Error processing text with OpenAI: {e}", exc_info=True)
+            logger.error(f"Error processing text with OpenAI: {e}", exc_info=True)
             return text, "Error generating summary", 0.5
 
+
+class AnthropicProvider(BaseLLMProvider):
+    """Anthropic Claude API provider for text processing"""
+
+    def _get_api_key_env_var(self):
+        return "ANTHROPIC_API_KEY"
+
+    def _get_model_name_env_var(self) -> str:
+        return "ANTHROPIC_MODEL_NAME"
+
+    def _initialize(self):
+        try:
+            self.client = anthropic.Anthropic(api_key=self.api_key)
+        except ImportError:
+            logger.error(
+                "Anthropic package not installed. Install with 'pip install anthropic'", exc_info=True)
+            raise
+
+    def process_text(self, text: str, prev_summary: str = None, prompt_template: str = None) -> Tuple[str, str, float]:
+        context = f"Previous context: {prev_summary}\n\n" if prev_summary else ""
+
+        if not prompt_template:
+            prompt_template = """
+            {context}The following is a chunk of text from a PDF document:
+            
+            {text}
+            
+            Please perform the following tasks:
+            1. Extract and clean the text, preserving the original meaning but fixing any OCR or formatting issues.
+            2. Identify any document structure elements (headings, lists, tables, etc.)
+            3. Provide a brief summary of this chunk (max 100 words)
+            
+            Respond in JSON format with the following structure:
+            {{
+                "processed_text": "the cleaned and processed text",
+                "summary": "brief summary of the chunk",
+                "structure": {{"headings": [[start_idx, end_idx]], "lists": [[start_idx, end_idx]], "tables": [[start_idx, end_idx]]}}
+            }}
+            """
+
+        prompt = prompt_template.format(context=context, text=text)
+
+        try:
+            response = self.client.messages.create(
+                model=self.model_name or "claude-3-opus-20240229",
+                max_tokens=4000,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                system="You are a helpful assistant that extracts and processes text from PDF documents."
+            )
+
+            # Extract JSON from response
+            json_match = re.search(
+                r'{.*}', response.content[0].text, re.DOTALL)
+            if json_match:
+                result = json.loads(json_match.group(0))
+            else:
+                result = {"processed_text": text,
+                          "summary": "Error parsing response"}
+
+            processed_text = result.get("processed_text", text)
+            summary = result.get("summary", "No summary provided")
+            confidence = 0.95  # Anthropic doesn't provide confidence scores, using fixed value
+
+            return processed_text, summary, confidence
+
+        except Exception as e:
+            logger.error(f"Error processing text with Anthropic: {e}", exc_info=True)
+            return text, "Error generating summary", 0.5
 
 
 # Example VLM Provider implementations
@@ -285,83 +354,99 @@ class OpenAIVisionProvider(BaseVLMProvider):
                 max_tokens=4096,
                 response_format={"type": "json_object"}
             )
-
+            
             # Check if response is valid before proceeding
             if not response:
                 logging.warning("Received None response from Vision API")
                 return "Error processing image", "No response", 0.5
 
+            # Handle both OpenAI and Alibaba response formats
+            try:
                 if hasattr(response, 'choices') and response.choices:
-                    content = response.choices[0].message.content
+                    content = response.choices[0].message.content 
                     content = content.strip()
-
-                    # Add detailed debugging
-                    self.logger.debug(f"Content type: {type(content)}")
-                    self.logger.debug(
-                        f"Content preview (first 100 chars): {content[:100]}")
-
-                    try:
-                        if isinstance(content, str):
-                            # Handle content that might be wrapped in markdown code blocks
-                            if content.startswith('```json') and '```' in content[6:]:
-                                # Extract just the JSON portion from the markdown code block
-                                json_start = content.find('{')
-                                json_end = content.rfind('}') + 1
-                                if json_start >= 0 and json_end > json_start:
-                                    content = content[json_start:json_end]
-
-                            # Handle UTF-8 BOM or other invisible characters
-                            if content.startswith('\ufeff'):
-                                content = content[1:]
-
-                            # Now parse the cleaned JSON content
-                            result = json.loads(content)
-                        else:
-                            # Handle Alibaba format where content might be a dict
-                            result = content
-
-                        # Verify result is a dictionary
-                        if not isinstance(result, dict):
-                            self.logger.error(
-                                f"Parsed result is not a dictionary: {type(result)}")
-                            result = {"extracted_text": str(
-                                content), "summary": "Error parsing JSON"}
-                    except json.JSONDecodeError as e:
-                        self.logger.error(f"Failed to parse JSON: {str(e)}")
-                        self.logger.debug(
-                            f"Raw content causing error: {repr(content)}")
-
-                        # Fallback approach for malformed JSON
-                        if '{' in content and '}' in content:
-                            try:
-                                # Try to extract the JSON portion
-                                json_part = content[content.find(
-                                    '{'):content.rfind('}')+1]
-                                result = json.loads(json_part)
-                                self.logger.info(
-                                    "Successfully extracted JSON from partial content")
-                            except:
-                                result = {"extracted_text": content,
-                                          "summary": "Error parsing JSON"}
-                        else:
-                            result = {"extracted_text": content,
-                                      "summary": "Error parsing JSON"}
+                    
+                    if isinstance(content, str):
+                        result = json.loads(content)
+                    else:
+                        # Handle Alibaba format where content might be a dict
+                        result = content
                 else:
                     raise ValueError("Invalid response format")
 
                 extracted_text = result.get("extracted_text", "")
                 summary = result.get("summary", "No summary provided")
 
-                # Return the extracted text and summary
+                # Just return the extracted text and placeholder values for the other fields
                 return extracted_text, summary, 0.9
 
-        except (json.JSONDecodeError, AttributeError, ValueError) as e:
-            self.logger.error(f"Error parsing response: {e}", exc_info=True)
-            self.logger.debug(f"Response content: {response}")
-            return "Error processing image" if response else "No response", "Error parsing response", 0.5
+            except (json.JSONDecodeError, AttributeError, ValueError) as e:
+                logger.error(f"Error parsing response: {e}", exc_info=True)
+                logger.debug(f"Response content: {response}")
+                return "Error processing image" if response else "No response", "Error parsing response", 0.5
+
         except Exception as e:
-            self.logger.error(
-                f"Error processing image with Vision API: {e}", exc_info=True)
+            logger.error(f"Error processing image with Vision API: {e}", exc_info=True)
+            return "Error processing image", "Error generating summary", 0.5
+
+
+class GoogleGeminiProvider(BaseVLMProvider):
+    """Google Gemini Vision API provider for image processing"""
+
+    def _get_api_key_env_var(self):
+        return "GOOGLE_API_KEY"
+
+    def _get_model_name_env_var(self) -> str:
+        return "GOOGLE_MODEL_NAME"
+
+    def _initialize(self):
+        try:
+            genai.configure(api_key=self.api_key)
+            self.model = genai.GenerativeModel(
+                self.model_name or 'gemini-pro-vision')
+        except ImportError:
+            logger.error(
+                "Google Generative AI package not installed. Install with 'pip install google-generativeai'", exc_info=True)
+            raise
+
+    def process_image(self, image: Image.Image, prev_summary: str = None, prompt_template: str = None) -> Tuple[str, str, float]:
+        context = f"Previous context: {prev_summary}\n\n" if prev_summary else ""
+
+        if not prompt_template:
+            prompt = f"""
+            {context}This image is a page from a PDF document. Please:
+            1. Extract all text visible in the image, preserving structure and layout
+            2. Identify any tables, charts, or diagrams and describe their content
+            3. Provide a brief summary of this page's content (max 100 words)
+            
+            Respond in JSON format with the following structure:
+            {{
+                "extracted_text": "all text from the image",
+                "summary": "brief summary of the page content"
+            }}
+            """
+        else:
+            prompt = prompt_template.format(context=context)
+
+        try:
+            response = self.model.generate_content([prompt, image])
+
+            # Extract JSON from response
+            json_match = re.search(r'{.*}', response.text, re.DOTALL)
+            if json_match:
+                result = json.loads(json_match.group(0))
+            else:
+                result = {"extracted_text": "Error parsing the image",
+                          "summary": "Error parsing response"}
+
+            extracted_text = result.get("extracted_text", "")
+            summary = result.get("summary", "No summary provided")
+            confidence = 0.9  # Gemini doesn't provide confidence scores, using fixed value
+
+            return extracted_text, summary, confidence
+
+        except Exception as e:
+            logger.error(f"Error processing image with Google Gemini: {e}", exc_info=True)
             return "Error processing image", "Error generating summary", 0.5
 
 
@@ -747,8 +832,7 @@ class PDFParser:
                         extracted_content = future.result()
                         all_extracted_content.append(extracted_content)
                     except Exception as e:
-                        logger.error(
-                            f"Error processing page {page_num}: {e}", exc_info=True)
+                        logger.error(f"Error processing page {page_num}: {e}", exc_info=True)
                         all_extracted_content.append(ExtractedContent(
                             text=f"[Error processing page {page_num + 1}]",
                             summary=f"Error on page {page_num + 1}",
