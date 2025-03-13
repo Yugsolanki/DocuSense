@@ -8,10 +8,19 @@ from typing import List, Dict, Tuple, Optional, Callable, Union, Any
 import re
 from dataclasses import dataclass
 import logging
+import json
+from collections import Counter
+import pytesseract
+import google.generativeai as genai
+import openai
+import base64
+import anthropic
+import threading
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s - [%(filename)s:%(lineno)d')
 logger = logging.getLogger(__name__)
 
 # Define data structures
@@ -46,7 +55,7 @@ class BaseLLMProvider:
         value = provided_value or os.environ.get(env_var_method())
         if not value:
             logger.warning(
-                f"No {value_name} provided for {self.__class__.__name__}")
+                f"No {value_name} provided for {self.__class__.__name__}", exc_info=True)
         return value
 
     def _get_api_key_env_var(self) -> str:
@@ -98,7 +107,7 @@ class BaseVLMProvider:
         value = provided_value or os.environ.get(env_var_method())
         if not value:
             logger.warning(
-                f"No {value_name} provided for {self.__class__.__name__}")
+                f"No {value_name} provided for {self.__class__.__name__}", exc_info=True)
         return value
 
     def _get_api_key_env_var(self) -> str:
@@ -108,7 +117,7 @@ class BaseVLMProvider:
     def _get_base_url_env_var(self) -> str:
         """Return environment variable name for base URL"""
         raise NotImplementedError
-    
+
     def _get_model_name_env_var(self) -> str:
         """Return environment variable name for model name"""
         raise NotImplementedError
@@ -141,18 +150,17 @@ class OpenAIProvider(BaseLLMProvider):
 
     def _get_base_url_env_var(self) -> str:
         return "LLM_API_BASE_URL"
-    
+
     def _get_model_name_env_var(self) -> str:
         return "LLM_MODEL_NAME"
 
     def _initialize(self):
         try:
-            import openai
             self.client = openai.OpenAI(
                 api_key=self.api_key, base_url=self.base_url)
         except ImportError:
             logger.error(
-                "OpenAI package not installed. Install with 'pip install openai'")
+                "OpenAI package not installed. Install with 'pip install openai'", exc_info=True)
             raise
 
     def process_text(self, text: str, prev_summary: str = None, prompt_template: str = None) -> Tuple[str, str, float]:
@@ -175,6 +183,8 @@ class OpenAIProvider(BaseLLMProvider):
                 "summary": "brief summary of the chunk",
                 "structure": {{"headings": [[start_idx, end_idx]], "lists": [[start_idx, end_idx]], "tables": [[start_idx, end_idx]]}}
             }}
+            
+            IMPORTANT: Your response must be valid JSON.
             """
 
         prompt = prompt_template.format(context=context, text=text)
@@ -182,14 +192,13 @@ class OpenAIProvider(BaseLLMProvider):
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
-                response_format={"type": "json_object"},
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant that extracts and processes text from PDF documents."},
+                    {"role": "system", "content": "You are a helpful assistant that extracts and processes text from PDF documents. Always repond in valid JSON format."},
                     {"role": "user", "content": prompt}
-                ]
+                ],
+                response_format={"type": "json_object"}
             )
 
-            import json
             result = json.loads(response.choices[0].message.content)
 
             processed_text = result.get("processed_text", text)
@@ -199,81 +208,10 @@ class OpenAIProvider(BaseLLMProvider):
             return processed_text, summary, confidence
 
         except Exception as e:
-            logger.error(f"Error processing text with OpenAI: {e}")
-            return text, "Error generating summary", 0.5
-
-
-class AnthropicProvider(BaseLLMProvider):
-    """Anthropic Claude API provider for text processing"""
-
-    def _get_api_key_env_var(self):
-        return "ANTHROPIC_API_KEY"
-    
-    def _get_model_name_env_var(self) -> str:
-        return "ANTHROPIC_MODEL_NAME"
-
-    def _initialize(self):
-        try:
-            import anthropic
-            self.client = anthropic.Anthropic(api_key=self.api_key)
-        except ImportError:
             logger.error(
-                "Anthropic package not installed. Install with 'pip install anthropic'")
-            raise
-
-    def process_text(self, text: str, prev_summary: str = None, prompt_template: str = None) -> Tuple[str, str, float]:
-        context = f"Previous context: {prev_summary}\n\n" if prev_summary else ""
-
-        if not prompt_template:
-            prompt_template = """
-            {context}The following is a chunk of text from a PDF document:
-            
-            {text}
-            
-            Please perform the following tasks:
-            1. Extract and clean the text, preserving the original meaning but fixing any OCR or formatting issues.
-            2. Identify any document structure elements (headings, lists, tables, etc.)
-            3. Provide a brief summary of this chunk (max 100 words)
-            
-            Respond in JSON format with the following structure:
-            {{
-                "processed_text": "the cleaned and processed text",
-                "summary": "brief summary of the chunk",
-                "structure": {{"headings": [[start_idx, end_idx]], "lists": [[start_idx, end_idx]], "tables": [[start_idx, end_idx]]}}
-            }}
-            """
-
-        prompt = prompt_template.format(context=context, text=text)
-
-        try:
-            response = self.client.messages.create(
-                model= self.model_name or "claude-3-opus-20240229",
-                max_tokens=4000,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
-                system="You are a helpful assistant that extracts and processes text from PDF documents."
-            )
-
-            import json
-            # Extract JSON from response
-            json_match = re.search(
-                r'{.*}', response.content[0].text, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group(0))
-            else:
-                result = {"processed_text": text,
-                          "summary": "Error parsing response"}
-
-            processed_text = result.get("processed_text", text)
-            summary = result.get("summary", "No summary provided")
-            confidence = 0.95  # Anthropic doesn't provide confidence scores, using fixed value
-
-            return processed_text, summary, confidence
-
-        except Exception as e:
-            logger.error(f"Error processing text with Anthropic: {e}")
+                f"Error processing text with OpenAI: {e}", exc_info=True)
             return text, "Error generating summary", 0.5
+
 
 
 # Example VLM Provider implementations
@@ -282,22 +220,21 @@ class OpenAIVisionProvider(BaseVLMProvider):
 
     def _get_api_key_env_var(self):
         return "VLM_API_KEY"
-    
+
     def _get_base_url_env_var(self) -> str:
         return "VLM_API_BASE_URL"
-    
+
     def _get_model_name_env_var(self) -> str:
         return "VLM_MODEL_NAME"
 
     def _initialize(self):
         try:
-            import openai
-            import base64
-            self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
+            self.client = openai.OpenAI(
+                api_key=self.api_key, base_url=self.base_url)
             self.base64 = base64
         except ImportError:
             logger.error(
-                "OpenAI package not installed. Install with 'pip install openai'")
+                "OpenAI package not installed. Install with 'pip install openai'", exc_info=True)
             raise
 
     def process_image(self, image: Image.Image, prev_summary: str = None, prompt_template: str = None) -> Tuple[str, str, float]:
@@ -312,15 +249,14 @@ class OpenAIVisionProvider(BaseVLMProvider):
             prompt = f"""
             {context}This image is a page from a PDF document. Please:
             1. Extract all text visible in the image, preserving structure and layout
-            2. Identify any tables, charts, or diagrams and describe their content
-            3. Provide a brief summary of this page's content (max 100 words)
             
             Respond in JSON format with the following structure:
             {{
-                "extracted_text": "all text from the image",
-                "summary": "brief summary of the page content",
-                "special_elements": ["table: description", "chart: description"]
+                "extracted_text": "all text from the image"
+                "summary": "brief summary of the page content"
             }}
+            
+            IMPORTANT: Your response must be valid JSON.
             """
         else:
             prompt = prompt_template.format(context=context)
@@ -332,7 +268,10 @@ class OpenAIVisionProvider(BaseVLMProvider):
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": prompt},
+                            {
+                                "type": "text",
+                                "text": prompt
+                            },
                             {
                                 "type": "image_url",
                                 "image_url": {
@@ -347,86 +286,82 @@ class OpenAIVisionProvider(BaseVLMProvider):
                 response_format={"type": "json_object"}
             )
 
-            import json
-            # Extract JSON from response
-            json_match = re.search(
-                r'{.*}', response.choices[0].message.content, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group(0))
-            else:
-                result = {"extracted_text": "Error parsing the image",
-                          "summary": "Error parsing response"}
+            # Check if response is valid before proceeding
+            if not response:
+                logging.warning("Received None response from Vision API")
+                return "Error processing image", "No response", 0.5
 
-            extracted_text = result.get("extracted_text", "")
-            summary = result.get("summary", "No summary provided")
-            confidence = 0.9  # OpenAI doesn't provide confidence scores, using fixed value
+                if hasattr(response, 'choices') and response.choices:
+                    content = response.choices[0].message.content
+                    content = content.strip()
 
-            return extracted_text, summary, confidence
+                    # Add detailed debugging
+                    self.logger.debug(f"Content type: {type(content)}")
+                    self.logger.debug(
+                        f"Content preview (first 100 chars): {content[:100]}")
 
+                    try:
+                        if isinstance(content, str):
+                            # Handle content that might be wrapped in markdown code blocks
+                            if content.startswith('```json') and '```' in content[6:]:
+                                # Extract just the JSON portion from the markdown code block
+                                json_start = content.find('{')
+                                json_end = content.rfind('}') + 1
+                                if json_start >= 0 and json_end > json_start:
+                                    content = content[json_start:json_end]
+
+                            # Handle UTF-8 BOM or other invisible characters
+                            if content.startswith('\ufeff'):
+                                content = content[1:]
+
+                            # Now parse the cleaned JSON content
+                            result = json.loads(content)
+                        else:
+                            # Handle Alibaba format where content might be a dict
+                            result = content
+
+                        # Verify result is a dictionary
+                        if not isinstance(result, dict):
+                            self.logger.error(
+                                f"Parsed result is not a dictionary: {type(result)}")
+                            result = {"extracted_text": str(
+                                content), "summary": "Error parsing JSON"}
+                    except json.JSONDecodeError as e:
+                        self.logger.error(f"Failed to parse JSON: {str(e)}")
+                        self.logger.debug(
+                            f"Raw content causing error: {repr(content)}")
+
+                        # Fallback approach for malformed JSON
+                        if '{' in content and '}' in content:
+                            try:
+                                # Try to extract the JSON portion
+                                json_part = content[content.find(
+                                    '{'):content.rfind('}')+1]
+                                result = json.loads(json_part)
+                                self.logger.info(
+                                    "Successfully extracted JSON from partial content")
+                            except:
+                                result = {"extracted_text": content,
+                                          "summary": "Error parsing JSON"}
+                        else:
+                            result = {"extracted_text": content,
+                                      "summary": "Error parsing JSON"}
+                else:
+                    raise ValueError("Invalid response format")
+
+                extracted_text = result.get("extracted_text", "")
+                summary = result.get("summary", "No summary provided")
+
+                # Return the extracted text and summary
+                return extracted_text, summary, 0.9
+
+        except (json.JSONDecodeError, AttributeError, ValueError) as e:
+            self.logger.error(f"Error parsing response: {e}", exc_info=True)
+            self.logger.debug(f"Response content: {response}")
+            return "Error processing image" if response else "No response", "Error parsing response", 0.5
         except Exception as e:
-            logger.error(f"Error processing image with OpenAI Vision: {e}")
-            return "Error processing image", "Error generating summary", 0.5
-
-
-class GoogleGeminiProvider(BaseVLMProvider):
-    """Google Gemini Vision API provider for image processing"""
-
-    def _get_api_key_env_var(self):
-        return "GOOGLE_API_KEY"
-    
-    def _get_model_name_env_var(self) -> str:
-        return "GOOGLE_MODEL_NAME"
-
-    def _initialize(self):
-        try:
-            import google.generativeai as genai
-            genai.configure(api_key=self.api_key)
-            self.model = genai.GenerativeModel(self.model_name or 'gemini-pro-vision')
-        except ImportError:
-            logger.error(
-                "Google Generative AI package not installed. Install with 'pip install google-generativeai'")
-            raise
-
-    def process_image(self, image: Image.Image, prev_summary: str = None, prompt_template: str = None) -> Tuple[str, str, float]:
-        context = f"Previous context: {prev_summary}\n\n" if prev_summary else ""
-
-        if not prompt_template:
-            prompt = f"""
-            {context}This image is a page from a PDF document. Please:
-            1. Extract all text visible in the image, preserving structure and layout
-            2. Identify any tables, charts, or diagrams and describe their content
-            3. Provide a brief summary of this page's content (max 100 words)
-            
-            Respond in JSON format with the following structure:
-            {{
-                "extracted_text": "all text from the image",
-                "summary": "brief summary of the page content",
-                "special_elements": ["table: description", "chart: description"]
-            }}
-            """
-        else:
-            prompt = prompt_template.format(context=context)
-
-        try:
-            response = self.model.generate_content([prompt, image])
-
-            import json
-            # Extract JSON from response
-            json_match = re.search(r'{.*}', response.text, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group(0))
-            else:
-                result = {"extracted_text": "Error parsing the image",
-                          "summary": "Error parsing response"}
-
-            extracted_text = result.get("extracted_text", "")
-            summary = result.get("summary", "No summary provided")
-            confidence = 0.9  # Gemini doesn't provide confidence scores, using fixed value
-
-            return extracted_text, summary, confidence
-
-        except Exception as e:
-            logger.error(f"Error processing image with Google Gemini: {e}")
+            self.logger.error(
+                f"Error processing image with Vision API: {e}", exc_info=True)
             return "Error processing image", "Error generating summary", 0.5
 
 
@@ -446,25 +381,32 @@ class PDFParser:
         confidence_threshold: float = 0.7,
         structure_detection: bool = True
     ):
-        self.llm_provider = llm_provider # Language model provider
-        self.vlm_provider = vlm_provider # Vision model provider
-        self.chunk_size = chunk_size # chunk size is the size of the text to be processed at a time
-        self.chunk_overlap = chunk_overlap # chunk overlap is the overlap between two chunks. This is useful for maintaining context
-        self.parallel_processing = parallel_processing # parallel processing is used to process multiple pages at the same time
-        self.max_workers = max_workers # max_workers is the number of workers to use for parallel processing
-        self.min_image_size = min_image_size # min_image_size is the minimum size of an image to be processed
-        self.ocr_fallback = ocr_fallback # ocr_fallback is used to enable OCR as a fallback for image processing
-        self.confidence_threshold = confidence_threshold # confidence_threshold is the threshold for merging adjacent
-        self.structure_detection = structure_detection # structure_detection is used to enable structure detection
+        self.llm_provider = llm_provider  # Language model provider
+        self.vlm_provider = vlm_provider  # Vision model provider
+        # chunk size is the size of the text to be processed at a time
+        self.chunk_size = chunk_size
+        # chunk overlap is the overlap between two chunks. This is useful for maintaining context
+        self.chunk_overlap = chunk_overlap
+        # parallel processing is used to process multiple pages at the same time
+        self.parallel_processing = parallel_processing
+        # max_workers is the number of workers to use for parallel processing
+        self.max_workers = max_workers
+        # min_image_size is the minimum size of an image to be processed
+        self.min_image_size = min_image_size
+        # ocr_fallback is used to enable OCR as a fallback for image processing
+        self.ocr_fallback = ocr_fallback
+        # confidence_threshold is the threshold for merging adjacent
+        self.confidence_threshold = confidence_threshold
+        # structure_detection is used to enable structure detection
+        self.structure_detection = structure_detection
 
         # Initialize fallback OCR if needed
         if self.ocr_fallback:
             try:
-                import pytesseract
                 self.pytesseract = pytesseract
             except ImportError:
                 logger.warning(
-                    "Tesseract OCR not installed, OCR fallback disabled. Install with 'pip install pytesseract'")
+                    "Tesseract OCR not installed, OCR fallback disabled. Install with 'pip install pytesseract'", exc_info=True)
                 self.ocr_fallback = False
 
     def _detect_has_images(self, doc) -> bool:
@@ -509,7 +451,6 @@ class PDFParser:
                     bottom_texts.append(lines[-1].strip())
 
             # Find repeating patterns
-            from collections import Counter
 
             top_counter = Counter(top_texts)
             bottom_counter = Counter(bottom_texts)
@@ -623,7 +564,7 @@ class PDFParser:
                         confidence=0.7
                     )
                 except Exception as e:
-                    logger.error(f"OCR fallback failed: {e}")
+                    logger.error(f"OCR fallback failed: {e}", exc_info=True)
 
             return ExtractedContent(
                 text=f"[Image content on page {page_num + 1}]",
@@ -638,7 +579,7 @@ class PDFParser:
 
         return ExtractedContent(
             text=extracted_text,
-            summary=summary,
+            summary=summary or f"Page {page_num + 1} content",
             page_num=page_num,
             has_images=True,
             confidence=confidence
@@ -692,20 +633,23 @@ class PDFParser:
         group_summaries = []
 
         for group in chunk_groups:
+            # Include both text and image summaries
             group_text = "\n".join(
-                [f"Page {chunk.page_num+1} Summary: {chunk.summary}" for chunk in group])
+                [f"Page {chunk.page_num+1} Summary: {chunk.summary}" for chunk in group if chunk.summary])
 
-            prompt_template = """
-            The following are summaries from pages of a document:
-            
-            {text}
-            
-            Please provide a cohesive summary that integrates these page summaries (max 150 words).
-            """
+            # Only process if we have meaningful summaries
+            if group_text.strip():
+                prompt_template = """
+                The following are summaries from pages of a document:
+                
+                {text}
+                
+                Please provide a cohesive summary that integrates these page summaries (max 150 words).
+                """
 
-            _, group_summary, _ = self.llm_provider.process_text(
-                group_text, prompt_template=prompt_template)
-            group_summaries.append(group_summary)
+                _, group_summary, _ = self.llm_provider.process_text(
+                    group_text, prompt_template=prompt_template)
+                group_summaries.append(group_summary)
 
         # If we have multiple group summaries, summarize them again
         if len(group_summaries) > 1:
@@ -739,9 +683,9 @@ class PDFParser:
         try:
             doc = fitz.open(pdf_path)
         except Exception as e:
-            logger.error(f"Error opening PDF file: {e}")
+            logger.error(f"Error opening PDF file: {e}", exc_info=True)
             return {"error": f"Failed to open PDF: {str(e)}"}
-        
+
         # Store page count before processing
         total_pages = len(doc)
 
@@ -803,7 +747,8 @@ class PDFParser:
                         extracted_content = future.result()
                         all_extracted_content.append(extracted_content)
                     except Exception as e:
-                        logger.error(f"Error processing page {page_num}: {e}")
+                        logger.error(
+                            f"Error processing page {page_num}: {e}", exc_info=True)
                         all_extracted_content.append(ExtractedContent(
                             text=f"[Error processing page {page_num + 1}]",
                             summary=f"Error on page {page_num + 1}",
@@ -902,7 +847,6 @@ def parse_pdf_with_custom_providers(
 
     # Save output to file if needed
     if output_path:
-        import json
         with open(output_path, "w") as f:
             json.dump(result, f, indent=2)  # Save with pretty formatting
 
@@ -910,7 +854,7 @@ def parse_pdf_with_custom_providers(
 
 
 # Example usage
-pdf_path = "./pdf/EXP8-Yug-BE4-C-58.pdf"
+pdf_path = "./pdf/DF.pdf"
 output_path = "sample_output.json"
 result = parse_pdf_with_custom_providers(
     pdf_path, parallel=True, output_path=output_path)
