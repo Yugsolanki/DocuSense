@@ -14,13 +14,11 @@ import pytesseract
 import google.generativeai as genai
 import openai
 import base64
-import anthropic
-import threading
 
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s - [%(filename)s:%(lineno)d')
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s - [%(filename)s:%(lineno)d]')
 logger = logging.getLogger(__name__)
 
 # Define data structures
@@ -208,78 +206,8 @@ class OpenAIProvider(BaseLLMProvider):
             return processed_text, summary, confidence
 
         except Exception as e:
-            logger.error(f"Error processing text with OpenAI: {e}", exc_info=True)
-            return text, "Error generating summary", 0.5
-
-
-class AnthropicProvider(BaseLLMProvider):
-    """Anthropic Claude API provider for text processing"""
-
-    def _get_api_key_env_var(self):
-        return "ANTHROPIC_API_KEY"
-
-    def _get_model_name_env_var(self) -> str:
-        return "ANTHROPIC_MODEL_NAME"
-
-    def _initialize(self):
-        try:
-            self.client = anthropic.Anthropic(api_key=self.api_key)
-        except ImportError:
             logger.error(
-                "Anthropic package not installed. Install with 'pip install anthropic'", exc_info=True)
-            raise
-
-    def process_text(self, text: str, prev_summary: str = None, prompt_template: str = None) -> Tuple[str, str, float]:
-        context = f"Previous context: {prev_summary}\n\n" if prev_summary else ""
-
-        if not prompt_template:
-            prompt_template = """
-            {context}The following is a chunk of text from a PDF document:
-            
-            {text}
-            
-            Please perform the following tasks:
-            1. Extract and clean the text, preserving the original meaning but fixing any OCR or formatting issues.
-            2. Identify any document structure elements (headings, lists, tables, etc.)
-            3. Provide a brief summary of this chunk (max 100 words)
-            
-            Respond in JSON format with the following structure:
-            {{
-                "processed_text": "the cleaned and processed text",
-                "summary": "brief summary of the chunk",
-                "structure": {{"headings": [[start_idx, end_idx]], "lists": [[start_idx, end_idx]], "tables": [[start_idx, end_idx]]}}
-            }}
-            """
-
-        prompt = prompt_template.format(context=context, text=text)
-
-        try:
-            response = self.client.messages.create(
-                model=self.model_name or "claude-3-opus-20240229",
-                max_tokens=4000,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
-                system="You are a helpful assistant that extracts and processes text from PDF documents."
-            )
-
-            # Extract JSON from response
-            json_match = re.search(
-                r'{.*}', response.content[0].text, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group(0))
-            else:
-                result = {"processed_text": text,
-                          "summary": "Error parsing response"}
-
-            processed_text = result.get("processed_text", text)
-            summary = result.get("summary", "No summary provided")
-            confidence = 0.95  # Anthropic doesn't provide confidence scores, using fixed value
-
-            return processed_text, summary, confidence
-
-        except Exception as e:
-            logger.error(f"Error processing text with Anthropic: {e}", exc_info=True)
+                f"Error processing text with OpenAI: {e}", exc_info=True)
             return text, "Error generating summary", 0.5
 
 
@@ -310,7 +238,7 @@ class OpenAIVisionProvider(BaseVLMProvider):
         # Convert image to base64
         buffered = io.BytesIO()
         image.save(buffered, format="PNG")
-        img_str = self.base64.b64encode(buffered.getvalue()).decode('utf-8')
+        img_str = self.base64.b64encode(buffered.getvalue()).decode()
 
         context = f"Previous context: {prev_summary}\n\n" if prev_summary else ""
 
@@ -318,6 +246,7 @@ class OpenAIVisionProvider(BaseVLMProvider):
             prompt = f"""
             {context}This image is a page from a PDF document. Please:
             1. Extract all text visible in the image, preserving structure and layout
+            2. Provide a brief summary of the page content
             
             Respond in JSON format with the following structure:
             {{
@@ -325,7 +254,7 @@ class OpenAIVisionProvider(BaseVLMProvider):
                 "summary": "brief summary of the page content"
             }}
             
-            IMPORTANT: Your response must be valid JSON.
+            IMPORTANT: Your response must be always valid JSON.
             """
         else:
             prompt = prompt_template.format(context=context)
@@ -354,100 +283,57 @@ class OpenAIVisionProvider(BaseVLMProvider):
                 max_tokens=4096,
                 response_format={"type": "json_object"}
             )
-            
+
             # Check if response is valid before proceeding
-            if not response:
+            if response is None:
                 logging.warning("Received None response from Vision API")
-                return "Error processing image", "No response", 0.5
+                return "", "No content extracted", 0.5
 
-            # Handle both OpenAI and Alibaba response formats
-            try:
-                if hasattr(response, 'choices') and response.choices:
-                    content = response.choices[0].message.content 
-                    content = content.strip()
-                    
-                    if isinstance(content, str):
-                        result = json.loads(content)
-                    else:
-                        # Handle Alibaba format where content might be a dict
-                        result = content
-                else:
-                    raise ValueError("Invalid response format")
+            # Handle content extraction from response
+            content = response.choices[0].message.content if hasattr(
+                response, 'choices') else None
 
-                extracted_text = result.get("extracted_text", "")
-                summary = result.get("summary", "No summary provided")
+            if not content:
+                logger.error("Invalid response format from Vision API")
+                return "", "No content extracted", 0.5
 
-                # Just return the extracted text and placeholder values for the other fields
-                return extracted_text, summary, 0.9
+            # Log the raw content for debugging
+            logger.info(f"Raw Response content: {content}")
 
-            except (json.JSONDecodeError, AttributeError, ValueError) as e:
-                logger.error(f"Error parsing response: {e}", exc_info=True)
-                logger.debug(f"Response content: {response}")
-                return "Error processing image" if response else "No response", "Error parsing response", 0.5
+            # Handle potential markdown-formatted content JSON responses
+            if content.strip().startswith('```json') and "```" in content:
+                # Extract JSON from markdown code block
+                json_content = content.split(
+                    '```json')[1].split('```')[0].strip()
 
-        except Exception as e:
-            logger.error(f"Error processing image with Vision API: {e}", exc_info=True)
-            return "Error processing image", "Error generating summary", 0.5
-
-
-class GoogleGeminiProvider(BaseVLMProvider):
-    """Google Gemini Vision API provider for image processing"""
-
-    def _get_api_key_env_var(self):
-        return "GOOGLE_API_KEY"
-
-    def _get_model_name_env_var(self) -> str:
-        return "GOOGLE_MODEL_NAME"
-
-    def _initialize(self):
-        try:
-            genai.configure(api_key=self.api_key)
-            self.model = genai.GenerativeModel(
-                self.model_name or 'gemini-pro-vision')
-        except ImportError:
-            logger.error(
-                "Google Generative AI package not installed. Install with 'pip install google-generativeai'", exc_info=True)
-            raise
-
-    def process_image(self, image: Image.Image, prev_summary: str = None, prompt_template: str = None) -> Tuple[str, str, float]:
-        context = f"Previous context: {prev_summary}\n\n" if prev_summary else ""
-
-        if not prompt_template:
-            prompt = f"""
-            {context}This image is a page from a PDF document. Please:
-            1. Extract all text visible in the image, preserving structure and layout
-            2. Identify any tables, charts, or diagrams and describe their content
-            3. Provide a brief summary of this page's content (max 100 words)
-            
-            Respond in JSON format with the following structure:
-            {{
-                "extracted_text": "all text from the image",
-                "summary": "brief summary of the page content"
-            }}
-            """
-        else:
-            prompt = prompt_template.format(context=context)
-
-        try:
-            response = self.model.generate_content([prompt, image])
-
-            # Extract JSON from response
-            json_match = re.search(r'{.*}', response.text, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group(0))
+                try:
+                    result = json.loads(json_content)
+                    return result
+                except json.JSONDecodeError as e:
+                    logger.error(
+                        f"Error parsing JSON content: {e}", exc_info=True)
+                    return "", "No content extracted", 0.5
             else:
-                result = {"extracted_text": "Error parsing the image",
-                          "summary": "Error parsing response"}
+                # Try parsing as regular JSON
+                try:
+                    result = json.loads(content)
+                    return result
+                except json.JSONDecodeError as e:
+                    logger.error(
+                        f"Error parsing JSON content: {e}", exc_info=True)
+                    return "", "No content extracted", 0.5
 
+            # Extract the fields with proper defaults
             extracted_text = result.get("extracted_text", "")
             summary = result.get("summary", "No summary provided")
-            confidence = 0.9  # Gemini doesn't provide confidence scores, using fixed value
+            confidence = 0.95  # OpenAI doesn't provide confidence scores, using fixed value
 
             return extracted_text, summary, confidence
 
         except Exception as e:
-            logger.error(f"Error processing image with Google Gemini: {e}", exc_info=True)
-            return "Error processing image", "Error generating summary", 0.5
+            logger.error(
+                f"Error processing image with Vision API: {str(e)}", exc_info=True)
+            return "", f"Error: {str(e)}", 0.5
 
 
 class PDFParser:
@@ -494,12 +380,21 @@ class PDFParser:
                     "Tesseract OCR not installed, OCR fallback disabled. Install with 'pip install pytesseract'", exc_info=True)
                 self.ocr_fallback = False
 
-    def _detect_has_images(self, doc) -> bool:
-        """Detect if the PDF has images"""
-        for page_num in range(len(doc)):
+    def _detect_has_images(self, doc, sample_size: int = 10) -> bool:
+        """Detect if the PDF has images efficiently by sampling pages"""
+
+        # If the document has few pages, check all
+        if len(doc) <= sample_size:
+            pages_to_check = range(len(doc))
+        else:
+            # Otherwise, check a sample of pages spread throughout the document
+            stride = max(1, len(doc) // sample_size)
+            pages_to_check = range(0, len(doc), stride)
+
+        for page_num in pages_to_check:
             page = doc[page_num]
             image_list = page.get_images(full=True)
-            if len(image_list) > 0:
+            if image_list:
                 for img in image_list:
                     xref = img[0]
                     base_image = doc.extract_image(xref)
@@ -785,6 +680,9 @@ class PDFParser:
 
         # Process pages
         all_extracted_content = []
+        
+        # Process the first few pages sequentially to build context
+        sequential_pages = min(3, len(doc))
         prev_summary = None
 
         def process_page(page_num):
@@ -832,7 +730,8 @@ class PDFParser:
                         extracted_content = future.result()
                         all_extracted_content.append(extracted_content)
                     except Exception as e:
-                        logger.error(f"Error processing page {page_num}: {e}", exc_info=True)
+                        logger.error(
+                            f"Error processing page {page_num}: {e}", exc_info=True)
                         all_extracted_content.append(ExtractedContent(
                             text=f"[Error processing page {page_num + 1}]",
                             summary=f"Error on page {page_num + 1}",
@@ -914,13 +813,13 @@ def parse_pdf_with_custom_providers(
 
     if llm_provider_name == "openai":
         llm_provider = OpenAIProvider(api_key=llm_api_key)
-    elif llm_provider_name == "anthropic":
-        llm_provider = AnthropicProvider(api_key=llm_api_key)
+    # elif llm_provider_name == "anthropic":
+    #     llm_provider = AnthropicProvider(api_key=llm_api_key)
 
     if vlm_provider_name == "openai":
         vlm_provider = OpenAIVisionProvider(api_key=vlm_api_key)
-    elif vlm_provider_name == "gemini":
-        vlm_provider = GoogleGeminiProvider(api_key=vlm_api_key)
+    # elif vlm_provider_name == "gemini":
+    #     vlm_provider = GoogleGeminiProvider(api_key=vlm_api_key)
 
     # Initialize PDF parser
     parser = PDFParser(llm_provider=llm_provider,
