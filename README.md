@@ -8,17 +8,29 @@ DocuSense is a powerful PDF parsing and content extraction tool that leverages L
 - **Image Processing**: Extract text and content from images within PDFs using advanced vision models.
 - **Document Summarization**: Generate hierarchical summaries of the document content.
 - **Parallel Processing**: Process multiple pages in parallel for faster extraction.
-- **Customizable Providers**: Support for multiple LLM and VLM providers, including OpenAI, Anthropic, and Google Gemini.
+- **Customizable Providers**: Support for multiple LLM and VLM providers, including OpenAI and any OpenAI API-compatible models.
 - **OCR Fallback**: Fallback to OCR (Tesseract) for image processing when VLM is not available.
 - **Header/Footer Detection**: Automatically detect and remove headers and footers from the document.
 - **Confidence-Based Merging**: Merge adjacent chunks of text based on confidence scores for better context preservation.
 
 ## Installation
 
-To install DocuSense, you need to have Python 3.7 or higher installed. You can install the required dependencies using pip:
+DocuSense can be installed using either `uv` or `pip`.
+
+### Using `uv`
+
+If you are using `uv`, you can install the required dependencies with the following command:
 
 ```bash
-pip install PyMuPDF pillow numpy pytesseract openai anthropic google-generativeai
+uv add PyMuPDF pillow numpy pytesseract openai
+```
+
+### Using `pip`
+
+If you are using `pip`, you can install the required dependencies with the following command:
+
+```bash
+pip install PyMuPDF pillow numpy pytesseract openai
 ```
 
 ## Usage
@@ -34,10 +46,10 @@ pdf_path = "sample.pdf"
 output_path = "sample_output.json"
 
 result = parse_pdf_with_custom_providers(
-    pdf_path, 
-    llm_provider_name="openai", 
-    vlm_provider_name="openai", 
-    parallel=True, 
+    pdf_path,
+    llm_provider_name="openai",
+    vlm_provider_name="openai",
+    parallel=True,
     output_path=output_path
 )
 
@@ -47,29 +59,6 @@ print(result)
 ### Custom Providers
 
 You can customize the LLM and VLM providers used for text and image processing:
-
-```python
-from docusense import parse_pdf_with_custom_providers, AnthropicProvider, GoogleGeminiProvider
-
-pdf_path = "sample.pdf"
-output_path = "sample_output.json"
-
-result = parse_pdf_with_custom_providers(
-    pdf_path, 
-    llm_provider_name="anthropic", 
-    vlm_provider_name="gemini", 
-    llm_api_key="your_anthropic_api_key", 
-    vlm_api_key="your_google_api_key", 
-    parallel=True, 
-    output_path=output_path
-)
-
-print(result)
-```
-
-### Advanced Configuration
-
-For more advanced configuration, you can directly use the `PDFParser` class:
 
 ```python
 from docusense import PDFParser, OpenAIProvider, OpenAIVisionProvider
@@ -128,12 +117,12 @@ You can configure the API keys and other settings using environment variables:
 ### LLM Providers
 
 - **OpenAI**: Uses GPT models for text processing.
-- **Anthropic**: Uses Claude models for text processing.
+- **OpenAI API Compatible**: Supports any model that implements the OpenAI API protocol
 
 ### VLM Providers
 
 - **OpenAI Vision**: Uses OpenAI's vision models for image processing.
-- **Google Gemini**: Uses Google's Gemini models for image processing.
+- **OpenAI API Compatible**: Supports any vision model that implements the OpenAI API protocol
 
 ## Example Output
 
@@ -178,8 +167,6 @@ DocuSense is licensed under the MIT License. See the [LICENSE](LICENSE) file for
 
 - [PyMuPDF](https://github.com/pymupdf/PyMuPDF) for PDF parsing.
 - [OpenAI](https://openai.com/) for LLM and VLM APIs.
-- [Anthropic](https://www.anthropic.com/) for Claude models.
-- [Google Gemini](https://ai.google/) for vision models.
 - [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) for OCR fallback.
 
 ## Contact

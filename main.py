@@ -11,7 +11,6 @@ import logging
 import json
 from collections import Counter
 import pytesseract
-import google.generativeai as genai
 import openai
 import base64
 
@@ -300,6 +299,7 @@ class OpenAIVisionProvider(BaseVLMProvider):
             # Log the raw content for debugging
             logger.info(f"Raw Response content: {content}")
 
+            result = None
             # Handle potential markdown-formatted content JSON responses
             if content.strip().startswith('```json') and "```" in content:
                 # Extract JSON from markdown code block
@@ -308,7 +308,6 @@ class OpenAIVisionProvider(BaseVLMProvider):
 
                 try:
                     result = json.loads(json_content)
-                    return result
                 except json.JSONDecodeError as e:
                     logger.error(
                         f"Error parsing JSON content: {e}", exc_info=True)
@@ -317,7 +316,6 @@ class OpenAIVisionProvider(BaseVLMProvider):
                 # Try parsing as regular JSON
                 try:
                     result = json.loads(content)
-                    return result
                 except json.JSONDecodeError as e:
                     logger.error(
                         f"Error parsing JSON content: {e}", exc_info=True)
@@ -605,8 +603,15 @@ class PDFParser:
 
     def _hierarchical_summarize(self, chunks: List[ExtractedContent]) -> str:
         """Create a hierarchical summary of the document"""
-        if not self.llm_provider or len(chunks) <= 1:
+
+        if not chunks:
+            return ""
+
+        if not self.llm_provider:
             return chunks[0].summary if chunks else ""
+
+        if len(chunks) <= 1:
+            return chunks[0].summary
 
         # Group chunks into groups of 5
         chunk_groups = [chunks[i:i+5] for i in range(0, len(chunks), 5)]
@@ -680,13 +685,12 @@ class PDFParser:
 
         # Process pages
         all_extracted_content = []
-        
+
         # Process the first few pages sequentially to build context
         sequential_pages = min(3, len(doc))
         prev_summary = None
 
-        def process_page(page_num):
-            nonlocal prev_summary
+        for page_num in range(sequential_pages):
             page = doc[page_num]
 
             if has_images:
@@ -707,22 +711,32 @@ class PDFParser:
                 extracted_content = self._process_text_page(
                     page_text, page_num, prev_summary)
 
+            all_extracted_content.append(extracted_content)
             prev_summary = extracted_content.summary
-            return extracted_content
 
-        if self.parallel_processing:
-            # Process pages in parallel
-            page_indices = list(range(len(doc)))
+        # Process remaining pages
+        remaining_pages = list(range(sequential_pages, len(doc)))
+
+        if self.parallel_processing and remaining_pages:
+            # For parallel processing of the rest, we'll use the last summary as shared context
+            shared_context = prev_summary
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                # Process first page to get initial summary
-                first_content = process_page(0)
-                all_extracted_content.append(first_content)
-                prev_summary = first_content.summary
+                def process_page_with_context(page_num):
+                    page = doc[page_num]
+                    if has_images:
+                        page_image = self._render_page_to_image(page)
+                        return self._process_image_page(page_image, page_num, shared_context)
+                    else:
+                        page_text = page.get_text()
+                        for header in headers:
+                            page_text = page_text.replace(header, "")
+                        for footer in footers:
+                            page_text = page_text.replace(footer, "")
+                        return self._process_text_page(page_text, page_num, shared_context)
 
-                # Process remaining pages in parallel with updated context
-                future_to_page = {executor.submit(
-                    process_page, page_num): page_num for page_num in page_indices[1:]}
+                future_to_page = {executor.submit(process_page_with_context, page_num): page_num
+                                  for page_num in remaining_pages}
 
                 for future in concurrent.futures.as_completed(future_to_page):
                     page_num = future_to_page[future]
@@ -739,10 +753,28 @@ class PDFParser:
                             confidence=0
                         ))
         else:
-            # Process pages sequentially
-            for page_num in range(len(doc)):
-                extracted_content = process_page(page_num)
+            # Process the rest sequentially
+            for page_num in remaining_pages:
+                page = doc[page_num]
+
+                if has_images:
+                    page_image = self._render_page_to_image(page)
+                    extracted_content = self._process_image_page(
+                        page_image, page_num, prev_summary)
+                else:
+                    page_text = page.get_text()
+
+                    # Remove headers and footers
+                    for header in headers:
+                        page_text = page_text.replace(header, "")
+                    for footer in footers:
+                        page_text = page_text.replace(footer, "")
+
+                    extracted_content = self._process_text_page(
+                        page_text, page_num, prev_summary)
+
                 all_extracted_content.append(extracted_content)
+                prev_summary = extracted_content.summary
 
         # Sort by page number
         all_extracted_content.sort(key=lambda x: x.page_num)
@@ -834,11 +866,3 @@ def parse_pdf_with_custom_providers(
             json.dump(result, f, indent=2)  # Save with pretty formatting
 
     return result
-
-
-# Example usage
-pdf_path = "./pdf/DF.pdf"
-output_path = "sample_output.json"
-result = parse_pdf_with_custom_providers(
-    pdf_path, parallel=True, output_path=output_path)
-print(result)
