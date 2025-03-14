@@ -13,6 +13,24 @@ DocuSense is a powerful PDF parsing and content extraction tool that leverages L
 - **Header/Footer Detection**: Automatically detect and remove headers and footers from the document.
 - **Confidence-Based Merging**: Merge adjacent chunks of text based on confidence scores for better context preservation.
 
+## How It works
+
+DocuSense follows a structured workflow to extract, process, and summarize content from PDF documents. Below is a high-level overview of the process:
+
+#### Flow Chart
+![Flow Chart](docs/flowchart.png)
+*Flow chart illustrating the overall workflow of DocuSense.*
+
+1. **PDF Parsing**: The PDF is loaded and split into individual pages.
+2. **Text Extraction**: Text is extracted from each page using LLMs.
+3. **Image Processing**: If images are detected, they are processed using VLMs or OCR (Tesseract) as a fallback.
+4. **Content Summarization**: Extracted content is summarized hierarchically.
+5. **Output Generation**: The final output is structured into text, summaries, and metadata.
+
+#### Sequence Diagram
+![Sequence Diagram](docs/sequence-diagram.png)
+*Sequence diagram showing the interaction between components during PDF processing.*
+
 ## Installation
 
 DocuSense can be installed using either `uv` or `pip`.
