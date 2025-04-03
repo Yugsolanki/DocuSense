@@ -5,6 +5,7 @@ description = "DocuSense is a powerful PDF parsing and content extraction tool t
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "fastapi[standard]>=0.115.12",
     "fitz>=0.0.1.dev2",
     "numpy>=2.2.3",
     "openai>=1.66.2",

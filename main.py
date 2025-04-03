@@ -4,15 +4,18 @@ import numpy as np
 from PIL import Image
 import io
 import concurrent.futures
-from typing import List, Dict, Tuple, Optional, Callable, Union, Any
+from typing import List, Dict, Tuple
 import re
 from dataclasses import dataclass
 import logging
 import json
 from collections import Counter
 import pytesseract
-import openai
-import base64
+import requests
+import tempfile
+import gc
+from utils.BaseProviders import BaseLLMProvider, BaseVLMProvider
+from utils.OpenAIProviders import OpenAIProvider, OpenAIVisionProvider
 
 
 # Configure logging
@@ -20,8 +23,8 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s - [%(filename)s:%(lineno)d]')
 logger = logging.getLogger(__name__)
 
-# Define data structures
 
+# Define data structures
 
 @dataclass
 class ExtractedContent:
@@ -32,306 +35,6 @@ class ExtractedContent:
     confidence: float = 1.0
     has_images: bool = False
     structure_tags: Dict[str, List[Tuple[int, int]]] = None
-
-
-class BaseLLMProvider:
-    """Base class for LLM providers"""
-
-    def __init__(self, api_key: str = None, base_url: str = None, model_name: str = None):
-        self.api_key = self._get_value(
-            api_key, self._get_api_key_env_var, "API key")
-        self.base_url = self._get_value(
-            base_url, self._get_base_url_env_var, "base URL")
-        self.model_name = self._get_value(
-            model_name, self._get_model_name_env_var, "model name")
-
-        self._initialize()
-
-    def _get_value(self, provided_value, env_var_method, value_name):
-        """Fetch value from argument or environment variable, with warning if missing."""
-        value = provided_value or os.environ.get(env_var_method())
-        if not value:
-            logger.warning(
-                f"No {value_name} provided for {self.__class__.__name__}", exc_info=True)
-        return value
-
-    def _get_api_key_env_var(self) -> str:
-        """Return environment variable name for API key"""
-        raise NotImplementedError
-
-    def _get_base_url_env_var(self) -> str:
-        """Return environment variable name for base URL"""
-        raise NotImplementedError
-
-    def _get_model_name_env_var(self) -> str:
-        """Return environment variable name for model name"""
-        raise NotImplementedError
-
-    def _initialize(self):
-        """Initialize the LLM client"""
-        pass
-
-    def process_text(self, text: str, prev_summary: str = None, prompt_template: str = None) -> Tuple[str, str, float]:
-        """
-        Process text chunk with LLM
-
-        Args:
-            text: Text to process
-            prev_summary: Previous chunk summary for context
-            prompt_template: Custom prompt template
-
-        Returns:
-            Tuple of (processed_text, summary, confidence)
-        """
-        raise NotImplementedError
-
-
-class BaseVLMProvider:
-    """Base class for VLM providers"""
-
-    def __init__(self, api_key: str = None, base_url: str = None, model_name: str = None):
-        self.api_key = self._get_value(
-            api_key, self._get_api_key_env_var, "API key")
-        self.base_url = self._get_value(
-            base_url, self._get_base_url_env_var, "base URL")
-        self.model_name = self._get_value(
-            model_name, self._get_model_name_env_var, "model name")
-
-        self._initialize()
-
-    def _get_value(self, provided_value, env_var_method, value_name):
-        """Fetch value from argument or environment variable, with warning if missing."""
-        value = provided_value or os.environ.get(env_var_method())
-        if not value:
-            logger.warning(
-                f"No {value_name} provided for {self.__class__.__name__}", exc_info=True)
-        return value
-
-    def _get_api_key_env_var(self) -> str:
-        """Return environment variable name for API key"""
-        raise NotImplementedError
-
-    def _get_base_url_env_var(self) -> str:
-        """Return environment variable name for base URL"""
-        raise NotImplementedError
-
-    def _get_model_name_env_var(self) -> str:
-        """Return environment variable name for model name"""
-        raise NotImplementedError
-
-    def _initialize(self):
-        """Initialize the VLM client"""
-        pass
-
-    def process_image(self, image: Image.Image, prev_summary: str = None, prompt_template: str = None) -> Tuple[str, str, float]:
-        """
-        Process image with VLM
-
-        Args:
-            image: PIL Image to process
-            prev_summary: Previous chunk summary for context
-            prompt_template: Custom prompt template
-
-        Returns:
-            Tuple of (extracted_text, summary, confidence)
-        """
-        raise NotImplementedError
-
-
-# Example LLM Provider implementations
-class OpenAIProvider(BaseLLMProvider):
-    """OpenAI API provider for text processing"""
-
-    def _get_api_key_env_var(self):
-        return "LLM_API_KEY"
-
-    def _get_base_url_env_var(self) -> str:
-        return "LLM_API_BASE_URL"
-
-    def _get_model_name_env_var(self) -> str:
-        return "LLM_MODEL_NAME"
-
-    def _initialize(self):
-        try:
-            self.client = openai.OpenAI(
-                api_key=self.api_key, base_url=self.base_url)
-        except ImportError:
-            logger.error(
-                "OpenAI package not installed. Install with 'pip install openai'", exc_info=True)
-            raise
-
-    def process_text(self, text: str, prev_summary: str = None, prompt_template: str = None) -> Tuple[str, str, float]:
-        context = f"Previous context: {prev_summary}\n\n" if prev_summary else ""
-
-        if not prompt_template:
-            prompt_template = """
-            {context}The following is a chunk of text from a PDF document:
-            
-            {text}
-            
-            Please perform the following tasks:
-            1. Extract and clean the text, preserving the original meaning but fixing any OCR or formatting issues.
-            2. Identify any document structure elements (headings, lists, tables, etc.)
-            3. Provide a brief summary of this chunk (max 100 words)
-            
-            Respond in JSON format with the following structure:
-            {{
-                "processed_text": "the cleaned and processed text",
-                "summary": "brief summary of the chunk",
-                "structure": {{"headings": [[start_idx, end_idx]], "lists": [[start_idx, end_idx]], "tables": [[start_idx, end_idx]]}}
-            }}
-            
-            IMPORTANT: Your response must be valid JSON.
-            """
-
-        prompt = prompt_template.format(context=context, text=text)
-
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant that extracts and processes text from PDF documents. Always repond in valid JSON format."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"}
-            )
-
-            result = json.loads(response.choices[0].message.content)
-
-            processed_text = result.get("processed_text", text)
-            summary = result.get("summary", "No summary provided")
-            confidence = 0.95  # OpenAI doesn't provide confidence scores, using fixed value
-
-            return processed_text, summary, confidence
-
-        except Exception as e:
-            logger.error(
-                f"Error processing text with OpenAI: {e}", exc_info=True)
-            return text, "Error generating summary", 0.5
-
-
-# Example VLM Provider implementations
-class OpenAIVisionProvider(BaseVLMProvider):
-    """OpenAI Vision API provider for image processing"""
-
-    def _get_api_key_env_var(self):
-        return "VLM_API_KEY"
-
-    def _get_base_url_env_var(self) -> str:
-        return "VLM_API_BASE_URL"
-
-    def _get_model_name_env_var(self) -> str:
-        return "VLM_MODEL_NAME"
-
-    def _initialize(self):
-        try:
-            self.client = openai.OpenAI(
-                api_key=self.api_key, base_url=self.base_url)
-            self.base64 = base64
-        except ImportError:
-            logger.error(
-                "OpenAI package not installed. Install with 'pip install openai'", exc_info=True)
-            raise
-
-    def process_image(self, image: Image.Image, prev_summary: str = None, prompt_template: str = None) -> Tuple[str, str, float]:
-        # Convert image to base64
-        buffered = io.BytesIO()
-        image.save(buffered, format="PNG")
-        img_str = self.base64.b64encode(buffered.getvalue()).decode()
-
-        context = f"Previous context: {prev_summary}\n\n" if prev_summary else ""
-
-        if not prompt_template:
-            prompt = f"""
-            {context}This image is a page from a PDF document. Please:
-            1. Extract all text visible in the image, preserving structure and layout
-            2. Provide a brief summary of the page content
-            
-            Respond in JSON format with the following structure:
-            {{
-                "extracted_text": "all text from the image"
-                "summary": "brief summary of the page content"
-            }}
-            
-            IMPORTANT: Your response must be always valid JSON.
-            """
-        else:
-            prompt = prompt_template.format(context=context)
-
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": prompt
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{img_str}",
-                                    "detail": "high"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens=4096,
-                response_format={"type": "json_object"}
-            )
-
-            # Check if response is valid before proceeding
-            if response is None:
-                logging.warning("Received None response from Vision API")
-                return "", "No content extracted", 0.5
-
-            # Handle content extraction from response
-            content = response.choices[0].message.content if hasattr(
-                response, 'choices') else None
-
-            if not content:
-                logger.error("Invalid response format from Vision API")
-                return "", "No content extracted", 0.5
-
-            # Log the raw content for debugging
-            logger.info(f"Raw Response content: {content}")
-
-            result = None
-            # Handle potential markdown-formatted content JSON responses
-            if content.strip().startswith('```json') and "```" in content:
-                # Extract JSON from markdown code block
-                json_content = content.split(
-                    '```json')[1].split('```')[0].strip()
-
-                try:
-                    result = json.loads(json_content)
-                except json.JSONDecodeError as e:
-                    logger.error(
-                        f"Error parsing JSON content: {e}", exc_info=True)
-                    return "", "No content extracted", 0.5
-            else:
-                # Try parsing as regular JSON
-                try:
-                    result = json.loads(content)
-                except json.JSONDecodeError as e:
-                    logger.error(
-                        f"Error parsing JSON content: {e}", exc_info=True)
-                    return "", "No content extracted", 0.5
-
-            # Extract the fields with proper defaults
-            extracted_text = result.get("extracted_text", "")
-            summary = result.get("summary", "No summary provided")
-            confidence = 0.95  # OpenAI doesn't provide confidence scores, using fixed value
-
-            return extracted_text, summary, confidence
-
-        except Exception as e:
-            logger.error(
-                f"Error processing image with Vision API: {str(e)}", exc_info=True)
-            return "", f"Error: {str(e)}", 0.5
 
 
 class PDFParser:
@@ -516,14 +219,13 @@ class PDFParser:
                 page_num=page_num
             )
 
-        processed_text, summary, confidence = self.llm_provider.process_text(
+        processed_text, summary = self.llm_provider.process_text(
             page_text, prev_summary)
 
         return ExtractedContent(
             text=processed_text,
             summary=summary,
-            page_num=page_num,
-            confidence=confidence
+            page_num=page_num
         )
 
     def _process_image_page(self, page_image: Image.Image, page_num: int, prev_summary: str = None) -> ExtractedContent:
@@ -552,15 +254,14 @@ class PDFParser:
                 confidence=0
             )
 
-        extracted_text, summary, confidence = self.vlm_provider.process_image(
+        extracted_text, summary = self.vlm_provider.process_image(
             page_image, prev_summary)
 
         return ExtractedContent(
             text=extracted_text,
             summary=summary or f"Page {page_num + 1} content",
             page_num=page_num,
-            has_images=True,
-            confidence=confidence
+            has_images=True
         )
 
     def _render_page_to_image(self, page, dpi: int = 300) -> Image.Image:
@@ -629,10 +330,10 @@ class PDFParser:
                 
                 {text}
                 
-                Please provide a cohesive summary that integrates these page summaries (max 150 words).
+                Please provide a cohesive summary that integrates these page summaries (max 150 words). Start directly with the summary. And do not include any other text.Use proper Markdown syntax without unnecessary escape characters or formatting issues. Avoid wrapping the response in a fenced code block unless required. Ensure clean, well-structured output with appropriate headings, lists, bold, and italics for direct rendering in a Markdown viewer.
                 """
 
-                _, group_summary, _ = self.llm_provider.process_text(
+                _, group_summary = self.llm_provider.process_text(
                     group_text, prompt_template=prompt_template)
                 group_summaries.append(group_summary)
 
@@ -641,181 +342,181 @@ class PDFParser:
             final_text = "\n\n".join(
                 [f"Section {i+1} Summary: {summary}" for i, summary in enumerate(group_summaries)])
 
-            prompt_template = """
+            prompt_template = """ 
             The following are summaries from sections of a document:
             
             {text}
             
-            Please provide a comprehensive document summary that integrates these section summaries (max 250 words).
+            Provide an integrated document summary combining these section summaries in 250 words or less. Start directly with the summary. And do not include any other text.Use proper Markdown syntax without unnecessary escape characters or formatting issues. Avoid wrapping the response in a fenced code block unless required. Ensure clean, well-structured output with appropriate headings, lists, bold, and italics for direct rendering in a Markdown viewer.
             """
 
-            _, document_summary, _ = self.llm_provider.process_text(
+            _, document_summary = self.llm_provider.process_text(
                 final_text, prompt_template=prompt_template)
             return document_summary
 
         return group_summaries[0] if group_summaries else ""
 
-    def parse_pdf(self, pdf_path: str) -> Dict:
+    def parse_pdf(self, pdf_input: str) -> Dict:
         """
-        Parse a PDF file and extract content using LLM/VLM
+        Parse a PDF file or URL and extract content using LLM/VLM
 
         Args:
-            pdf_path: Path to the PDF file
+            pdf_input: Path to the PDF file or URL to the PDF
 
         Returns:
             Dictionary with extracted content
         """
+        temp_file = None
+        doc = None
+
         try:
-            doc = fitz.open(pdf_path)
-        except Exception as e:
-            logger.error(f"Error opening PDF file: {e}", exc_info=True)
-            return {"error": f"Failed to open PDF: {str(e)}"}
-
-        # Store page count before processing
-        total_pages = len(doc)
-
-        # Detect if PDF has images
-        has_images = self._detect_has_images(doc)
-        logger.info(f"PDF contains images: {has_images}")
-
-        # Extract headers and footers
-        headers, footers = self._extract_headers_footers(doc)
-        logger.info(f"Detected headers: {headers}")
-        logger.info(f"Detected footers: {footers}")
-
-        # Process pages
-        all_extracted_content = []
-
-        # Process the first few pages sequentially to build context
-        sequential_pages = min(3, len(doc))
-        prev_summary = None
-
-        for page_num in range(sequential_pages):
-            page = doc[page_num]
-
-            if has_images:
-                # Render page to image and process with VLM
-                page_image = self._render_page_to_image(page)
-                extracted_content = self._process_image_page(
-                    page_image, page_num, prev_summary)
+            # Check if input is a URL
+            if pdf_input.startswith(('http://', 'https://')):
+                response = requests.get(pdf_input, stream=True)
+                response.raise_for_status()
+                temp_file = tempfile.NamedTemporaryFile(
+                    delete=False, suffix='.pdf')
+                for chunk in response.iter_content(chunk_size=8192):
+                    temp_file.write(chunk)
+                temp_file.close()
+                pdf_path = temp_file.name
             else:
-                # Extract text and process with LLM
-                page_text = page.get_text()
+                pdf_path = pdf_input
 
-                # Remove headers and footers
-                for header in headers:
-                    page_text = page_text.replace(header, "")
-                for footer in footers:
-                    page_text = page_text.replace(footer, "")
+            doc = fitz.open(pdf_path)
+            total_pages = len(doc)  # Store page count before any processing
 
-                extracted_content = self._process_text_page(
-                    page_text, page_num, prev_summary)
+            has_images = self._detect_has_images(doc)
+            logger.info(f"PDF contains images: {has_images}")
 
-            all_extracted_content.append(extracted_content)
-            prev_summary = extracted_content.summary
+            headers, footers = self._extract_headers_footers(doc)
+            logger.info(f"Detected headers: {headers}")
+            logger.info(f"Detected footers: {footers}")
 
-        # Process remaining pages
-        remaining_pages = list(range(sequential_pages, len(doc)))
+            all_extracted_content = []
+            sequential_pages = min(3, total_pages)
+            prev_summary = None
 
-        if self.parallel_processing and remaining_pages:
-            # For parallel processing of the rest, we'll use the last summary as shared context
-            shared_context = prev_summary
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                def process_page_with_context(page_num):
-                    page = doc[page_num]
-                    if has_images:
-                        page_image = self._render_page_to_image(page)
-                        return self._process_image_page(page_image, page_num, shared_context)
-                    else:
-                        page_text = page.get_text()
-                        for header in headers:
-                            page_text = page_text.replace(header, "")
-                        for footer in footers:
-                            page_text = page_text.replace(footer, "")
-                        return self._process_text_page(page_text, page_num, shared_context)
-
-                future_to_page = {executor.submit(process_page_with_context, page_num): page_num
-                                  for page_num in remaining_pages}
-
-                for future in concurrent.futures.as_completed(future_to_page):
-                    page_num = future_to_page[future]
-                    try:
-                        extracted_content = future.result()
-                        all_extracted_content.append(extracted_content)
-                    except Exception as e:
-                        logger.error(
-                            f"Error processing page {page_num}: {e}", exc_info=True)
-                        all_extracted_content.append(ExtractedContent(
-                            text=f"[Error processing page {page_num + 1}]",
-                            summary=f"Error on page {page_num + 1}",
-                            page_num=page_num,
-                            confidence=0
-                        ))
-        else:
-            # Process the rest sequentially
-            for page_num in remaining_pages:
+            for page_num in range(sequential_pages):
                 page = doc[page_num]
-
                 if has_images:
                     page_image = self._render_page_to_image(page)
                     extracted_content = self._process_image_page(
                         page_image, page_num, prev_summary)
                 else:
                     page_text = page.get_text()
-
-                    # Remove headers and footers
                     for header in headers:
                         page_text = page_text.replace(header, "")
                     for footer in footers:
                         page_text = page_text.replace(footer, "")
-
                     extracted_content = self._process_text_page(
                         page_text, page_num, prev_summary)
 
                 all_extracted_content.append(extracted_content)
                 prev_summary = extracted_content.summary
 
-        # Sort by page number
-        all_extracted_content.sort(key=lambda x: x.page_num)
+            remaining_pages = list(range(sequential_pages, total_pages))
+            if self.parallel_processing and remaining_pages:
+                shared_context = prev_summary
+                with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                    def process_page_with_context(page_num):
+                        page = doc[page_num]
+                        if has_images:
+                            page_image = self._render_page_to_image(page)
+                            return self._process_image_page(page_image, page_num, shared_context)
+                        else:
+                            page_text = page.get_text()
+                            for header in headers:
+                                page_text = page_text.replace(header, "")
+                            for footer in footers:
+                                page_text = page_text.replace(footer, "")
+                            return self._process_text_page(page_text, page_num, shared_context)
 
-        # Merge adjacent low-confidence chunks
-        if self.confidence_threshold < 1.0:
-            all_extracted_content = self._merge_adjacent_chunks(
-                all_extracted_content, self.confidence_threshold)
+                    future_to_page = {executor.submit(process_page_with_context, page_num): page_num
+                                      for page_num in remaining_pages}
 
-        # Create hierarchical summary
-        document_summary = self._hierarchical_summarize(all_extracted_content)
+                    for future in concurrent.futures.as_completed(future_to_page):
+                        page_num = future_to_page[future]
+                        try:
+                            extracted_content = future.result()
+                            all_extracted_content.append(extracted_content)
+                        except Exception as e:
+                            logger.error(
+                                f"Error processing page {page_num}: {e}", exc_info=True)
+                            all_extracted_content.append(ExtractedContent(
+                                text=f"[Error processing page {page_num + 1}]",
+                                summary=f"Error on page {page_num + 1}",
+                                page_num=page_num,
+                                confidence=0
+                            ))
+            else:
+                for page_num in remaining_pages:
+                    page = doc[page_num]
+                    if has_images:
+                        page_image = self._render_page_to_image(page)
+                        extracted_content = self._process_image_page(
+                            page_image, page_num, prev_summary)
+                    else:
+                        page_text = page.get_text()
+                        for header in headers:
+                            page_text = page_text.replace(header, "")
+                        for footer in footers:
+                            page_text = page_text.replace(footer, "")
+                        extracted_content = self._process_text_page(
+                            page_text, page_num, prev_summary)
 
-        # Close the document
-        doc.close()
+                    all_extracted_content.append(extracted_content)
+                    prev_summary = extracted_content.summary
 
-        # Prepare result
-        result = {
-            "text": "\n\n".join([content.text for content in all_extracted_content]),
-            "pages": [
-                {
-                    "page_num": content.page_num + 1,
-                    "text": content.text,
-                    "summary": content.summary,
-                    "has_images": content.has_images,
-                    "confidence": content.confidence
+            all_extracted_content.sort(key=lambda x: x.page_num)
+            if self.confidence_threshold < 1.0:
+                all_extracted_content = self._merge_adjacent_chunks(
+                    all_extracted_content, self.confidence_threshold)
+
+            document_summary = self._hierarchical_summarize(
+                all_extracted_content)
+
+            result = {
+                "text": "\n\n".join([content.text for content in all_extracted_content]),
+                "pages": [
+                    {
+                        "page_num": content.page_num + 1,
+                        "text": content.text,
+                        "summary": content.summary,
+                        "has_images": content.has_images,
+                        "confidence": content.confidence
+                    }
+                    for content in all_extracted_content
+                ],
+                "summary": document_summary,
+                "metadata": {
+                    "total_pages": total_pages,
+                    "contains_images": has_images
                 }
-                for content in all_extracted_content
-            ],
-            "summary": document_summary,
-            "metadata": {
-                "total_pages": total_pages,
-                "contains_images": has_images
             }
-        }
+
+        except Exception as e:
+            logger.error(f"Error processing PDF: {e}", exc_info=True)
+            return {"error": f"Failed to process PDF: {str(e)}"}
+
+        finally:
+            # Cleanup in finally block to ensure it always runs
+            if doc is not None:
+                doc.close()
+            if temp_file is not None:
+                try:
+                    os.unlink(temp_file.name)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to delete temporary file: {e}", exc_info=True)
+            gc.collect()
 
         return result
 
 
 # Example usage function
 def parse_pdf_with_custom_providers(
-    pdf_path: str,
+    pdf_url: str,
     llm_provider_name: str = "openai",
     vlm_provider_name: str = "openai",
     llm_api_key: str = None,
@@ -845,20 +546,16 @@ def parse_pdf_with_custom_providers(
 
     if llm_provider_name == "openai":
         llm_provider = OpenAIProvider(api_key=llm_api_key)
-    # elif llm_provider_name == "anthropic":
-    #     llm_provider = AnthropicProvider(api_key=llm_api_key)
 
     if vlm_provider_name == "openai":
         vlm_provider = OpenAIVisionProvider(api_key=vlm_api_key)
-    # elif vlm_provider_name == "gemini":
-    #     vlm_provider = GoogleGeminiProvider(api_key=vlm_api_key)
 
     # Initialize PDF parser
     parser = PDFParser(llm_provider=llm_provider,
                        vlm_provider=vlm_provider, parallel_processing=parallel)
 
     # Parse the PDF
-    result = parser.parse_pdf(pdf_path)
+    result = parser.parse_pdf(pdf_url)
 
     # Save output to file if needed
     if output_path:
