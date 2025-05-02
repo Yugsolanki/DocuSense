@@ -34,8 +34,8 @@ class OpenAIProvider(BaseLLMProvider):
                 "OpenAI package not installed. Install with 'pip install openai'", exc_info=True)
             raise
 
-    def process_text(self, text: str, prev_summary: str = None, prompt_template: str = None) -> Tuple[str, str]:
-        context = f"Previous context: {prev_summary}\n\n" if prev_summary else ""
+    def process_text(self, text: str, context: str = None, prompt_template: str = None) -> Tuple[str, str]:
+        context = f"Previous context: {context}\n\n" if context else ""
 
         if not prompt_template:
             prompt_template = """
@@ -103,13 +103,13 @@ class OpenAIVisionProvider(BaseVLMProvider):
                 "OpenAI package not installed. Install with 'pip install openai'", exc_info=True)
             raise
 
-    def process_image(self, image: Image.Image, prev_summary: str = None, prompt_template: str = None) -> Tuple[str, str]:
+    def process_image(self, image: Image.Image, context: str = None, prompt_template: str = None) -> Tuple[str, str]:
         # Convert image to base64
         buffered = io.BytesIO()
         image.save(buffered, format="PNG")
         img_str = self.base64.b64encode(buffered.getvalue()).decode()
 
-        context = f"Previous context: {prev_summary}\n\n" if prev_summary else ""
+        context = f"Previous context: {context}\n\n" if context else ""
 
         if not prompt_template:
             prompt = f"""

@@ -47,7 +47,7 @@ class BaseLLMProvider:
         """Initialize the LLM client"""
         pass
 
-    def process_text(self, text: str, prev_summary: str = None, prompt_template: str = None) -> Tuple[str, str, float]:
+    def process_text(self, text: str, context: str = None, prompt_template: str = None) -> Tuple[str, str, float]:
         """
         Process text chunk with LLM
 
@@ -99,7 +99,7 @@ class BaseVLMProvider:
         """Initialize the VLM client"""
         pass
 
-    def process_image(self, image: Image.Image, prev_summary: str = None, prompt_template: str = None) -> Tuple[str, str, float]:
+    def process_image(self, image: Image.Image, context: str = None, prompt_template: str = None) -> Tuple[str, str, float]:
         """
         Process image with VLM
 
