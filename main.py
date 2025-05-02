@@ -38,7 +38,38 @@ class ExtractedContent:
 
 
 class PDFParser:
-    """Main PDF parsing class with LLM and VLM integration"""
+    """PDF parsing class with LLM and VLM integration
+
+    Attributes:
+        llm_provider (BaseLLMProvider): Language model provider
+        vlm_provider (BaseVLMProvider): Vision model provider
+        chunk_size (int): Size of text chunks to process
+        chunk_overlap (int): Overlap between text chunks
+        parallel_processing (bool): Whether to process pages in parallel
+        max_workers (int): Maximum number of workers for parallel processing
+        min_image_size (int): Minimum size of an image to process
+        ocr_fallback (bool): Whether to use OCR as a fallback for image processing
+        confidence_threshold (float): Threshold for merging adjacent chunks
+        structure_detection (bool): Whether to enable structure detection
+
+    Methods:
+        _detect_has_images: Detect if the PDF has images efficiently by sampling pages
+        _extract_headers_footers: Attempt to identify headers and footers for removal
+        _extract_semantic_chunks: Extract semantic chunks from text with improved chunking logic
+        _process_text_page: Process a page of text using LLM
+        _process_image_page: Process a page as image using VLM
+        _render_page_to_image: Render a PDF page to a PIL Image
+        _merge_adjacent_chunks: Merge adjacent chunks with low confidence
+        _hierarchical_summarize: Create a hierarchical summary of the document
+        parse_pdf: Parse a PDF file or URL and extract content using LLM/VLM
+
+    Example:
+        >>> parser = PDFParser(llm_provider=OpenAIProvider(), vlm_provider=OpenAIVisionProvider())
+        >>> result = parser.parse_pdf("example.pdf")
+        >>> print(result)
+        [ExtractedContent(text='Page 1 content', summary='Page 1 summary', page_num=0),
+        ExtractedContent(text='Page 2 content', summary='Page 2 summary', page_num=1)]
+    """
 
     def __init__(
         self,
@@ -378,6 +409,16 @@ class PDFParser:
                     delete=False, suffix='.pdf')
                 for chunk in response.iter_content(chunk_size=8192):
                     temp_file.write(chunk)
+                temp_file.close()
+                pdf_path = temp_file.name
+            # Check if input is base64 encoded
+            elif pdf_input.startswith('data:application/pdf;base64,'):
+                import base64
+                base64_data = pdf_input.split(',', 1)[1]
+                pdf_bytes = base64.b64decode(base64_data)
+                temp_file = tempfile.NamedTemporaryFile(
+                    delete=False, suffix='.pdf')
+                temp_file.write(pdf_bytes)
                 temp_file.close()
                 pdf_path = temp_file.name
             else:
